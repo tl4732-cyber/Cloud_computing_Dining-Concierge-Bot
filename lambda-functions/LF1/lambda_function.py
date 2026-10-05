@@ -1,8 +1,10 @@
 import json
 import os
+
 import boto3
 
 sqs = boto3.client("sqs")
+state_table = boto3.resource("dynamodb").Table("user-search-state")
 QUEUE_URL = os.environ["SQS_QUEUE_URL"]
 
 
@@ -57,10 +59,31 @@ def elicit_slot(intent, slot_name, message):
     }
 
 
+def previous_search(user_id):
+    return state_table.get_item(Key={"userId": user_id}).get("Item")
+
+
+def same_search(previous, location, cuisine):
+    if not previous or not previous.get("restaurants"):
+        return False
+    return (
+        "manhattan" in (location or "").lower()
+        and "manhattan" in previous.get("location", "").lower()
+        and cuisine
+        and cuisine.lower() == previous.get("cuisine", "").lower()
+    )
+
+
+def queue(payload):
+    sqs.send_message(QueueUrl=QUEUE_URL, MessageBody=json.dumps(payload))
+
+
 def handle_dining(event):
     intent = event["sessionState"]["intent"]
     slots = intent.get("slots") or {}
+    user_id = event["sessionId"]
     location = get_slot(slots, "Location")
+    cuisine = get_slot(slots, "Cuisine")
 
     if location and "manhattan" not in location.lower():
         return elicit_slot(
@@ -69,21 +92,30 @@ def handle_dining(event):
             f"Sorry, I can't fulfill requests for {location}. Please enter a valid location.",
         )
 
+    if location and cuisine and same_search(previous_search(user_id), location, cuisine):
+        answer = (get_slot(slots, "SameRecommendation") or "").lower()
+        if answer in {"yes", "yeah", "yep", "sure"}:
+            queue({"reuse_previous": True, "session_id": user_id, "location": location, "cuisine": cuisine})
+            return close(intent, "I'll send you the same recommendations as last time.")
+        if answer not in {"no", "nope"}:
+            return elicit_slot(
+                intent,
+                "SameRecommendation",
+                f"You asked for {cuisine} in {location} last time. Would you like the same recommendations as last time?",
+            )
+
     if event["invocationSource"] == "DialogCodeHook":
         return delegate(intent)
 
-    message = {
+    queue({
         "location": location,
-        "cuisine": get_slot(slots, "Cuisine"),
+        "cuisine": cuisine,
         "dining_time": get_slot(slots, "DiningTime"),
         "number_of_people": get_slot(slots, "NumberOfPeople"),
         "email": get_slot(slots, "Email"),
-    }
-    sqs.send_message(QueueUrl=QUEUE_URL, MessageBody=json.dumps(message))
-    return close(
-        intent,
-        "You're all set. Expect my suggestions shortly! Have a good day.",
-    )
+        "session_id": user_id,
+    })
+    return close(intent, "You're all set. Expect my suggestions shortly! Have a good day.")
 
 
 def lambda_handler(event, context):
