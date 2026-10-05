@@ -25,12 +25,24 @@ $(document).ready(function() {
     }
   }
 
+  function getSessionId() {
+    var key = 'diningConciergeSessionId';
+    var existing = window.sessionStorage.getItem(key);
+    if (existing) {
+      return existing;
+    }
+    var id = 'web-' + Date.now();
+    window.sessionStorage.setItem(key, id);
+    return id;
+  }
+
   function callChatbotApi(message) {
     // params, body, additionalParams
     return sdk.chatbotPost({}, {
       messages: [{
         type: 'unstructured',
         unstructured: {
+          id: getSessionId(),
           text: message
         }
       }]
