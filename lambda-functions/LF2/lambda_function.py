@@ -1,6 +1,5 @@
 import base64
 import http.client
-import ipaddress
 import json
 import os
 import random
@@ -19,27 +18,34 @@ ENDPOINT = os.environ["OPENSEARCH_ENDPOINT"].rstrip("/")
 SENDER = os.environ["SENDER_EMAIL"]
 
 
+def opensearch_connection(host):
+    context = ssl.create_default_context()
+    addresses = []
+    for info in socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM):
+        ip = info[4][0]
+        if ip not in addresses:
+            addresses.append(ip)
+    # 100.x answers from a laptop but does not return data to Lambda.
+    addresses.sort(key=lambda ip: ip.startswith("100."))
+    last_error = None
+    for ip in addresses:
+        try:
+            raw = socket.create_connection((ip, 443), timeout=5)
+            return context.wrap_socket(raw, server_hostname=host)
+        except OSError as error:
+            last_error = error
+    raise RuntimeError(f"Could not connect to {host}: {last_error}")
+
+
 def opensearch_ids(cuisine):
     endpoint = os.environ["OPENSEARCH_ENDPOINT"].rstrip("/")
     host = endpoint.removeprefix("https://").split("/")[0]
-    shared = ipaddress.ip_network("100.64.0.0/10")
-    public = None
-    for info in socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM):
-        ip = info[4][0]
-        if ipaddress.ip_address(ip) not in shared:
-            public = ip
-            break
-    if not public:
-        raise RuntimeError(f"No public address for {host}")
-
     token = base64.b64encode(
         f"{os.environ['OPENSEARCH_USER']}:{os.environ['OPENSEARCH_PASSWORD']}".encode()
     ).decode()
     payload = json.dumps({"size": 50, "query": {"term": {"Cuisine": cuisine}}}).encode()
-    context = ssl.create_default_context()
-    raw = socket.create_connection((public, 443), timeout=10)
-    ssock = context.wrap_socket(raw, server_hostname=host)
-    connection = http.client.HTTPSConnection(host, 443, timeout=10, context=context)
+    ssock = opensearch_connection(host)
+    connection = http.client.HTTPSConnection(host, 443, timeout=10)
     try:
         connection.sock = ssock
         connection.request(
@@ -110,6 +116,8 @@ def lambda_handler(event, context):
 
     message = messages[0]
     request = json.loads(message["Body"])
+    if request.get("cuisine"):
+        request["cuisine"] = request["cuisine"].strip().title()
 
     if request.get("reuse_previous"):
         saved = state_table.get_item(Key={"userId": request["session_id"]}).get("Item")
